@@ -1,0 +1,40 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+
+# ---------- 构建产物（可用 build_full_pkg.bat / build_exe.bat 重新生成，不要入库） ----------
+# 桌面联.zip / 桌面隐翅虫.exe（40MB 级）
+dist/
+# 隐翅虫中继.exe（9MB）
+dist_relay/
+# PyInstaller 中间目录（45MB）
+build/
+build_relay/
+# 分发包（40MB 级），要发布请用 GitHub Releases 挂附件
+*.zip
+
+# ---------- 本地运行生成的内容 ----------
+# 个人存档（虫子位置/三项数值/后代进度）
+save.json
+save.json.tmp
+# 中继地址，构建时按本机 Tailscale IP 自动生成
+relay.txt
+# 调试用进程信息转储
+procinfo.txt
+# 测试日志
+final_test_*.log
+# QA 渲染图（render_preview.py 可随时重新生成）
+preview_*.png
+# 壁纸合成过程的中间预览图（apply_wallpaper_parallax.py 可随时重新生成）
+wallpaper/_dish_debug*.png
+wallpaper/parallax/00_composite_preview*.png
+
+# ---------- 工具沙箱 ----------
+.workbuddy-ai/
+
+# ---------- 系统 ----------
+Thumbs.db
+desktop.ini
+
+# ---------- PyInstaller 自动生成的 spec（每次构建都会用本机绝对路径重写，别入库）----------
+*.spec
