@@ -4,6 +4,11 @@
 #   powershell -ExecutionPolicy Bypass -File "<path-to-this-repo>\make_release.ps1"
 #
 # Steps:
+#   0. verify the package: check_pkg_clean.py (no real relay address baked
+#      into the exe) + check_exe_version.py (the exe matches the current
+#      source).  Both must pass; a failure aborts BEFORE anything is
+#      uploaded.  (v1.0 shipped an exe built before the adult redraw AND
+#      baked with the host's real Tailscale address - hence the gates.)
 #   1. get a GitHub token: Git Credential Manager cache first, else prompt to paste one
 #      (create at https://github.com/settings/tokens/new?scopes=repo&description=bug-pet-release )
 #   2. create release "v1.0" (or reuse it if it already exists)
@@ -69,6 +74,33 @@ if (-not (Test-Path -LiteralPath $Zip)) {
     Write-Host "[FAIL] zip not found: $Zip" -ForegroundColor Red
     exit 1
 }
+
+# ---------- 0) verify the package BEFORE touching GitHub ----------
+# Two independent gates, both must pass.  A zip that embeds the host's real
+# Tailscale address, or whose exe predates the last commit, must never reach
+# the release -- both mistakes are invisible once the upload succeeds.
+Write-Host '== gate 1/2: package is clean (no real relay address baked in) =='
+Push-Location $Dir
+try {
+    python check_pkg_clean.py $Zip
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host '[FAIL] gate 1: the package embeds a real relay address - NOT publishing' -ForegroundColor Red
+        exit 1
+    }
+    Write-Host '== gate 2/2: exe matches the current source =='
+    python check_exe_version.py $Zip
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host '[FAIL] gate 2: the exe does not match the current source - rebuild first - NOT publishing' -ForegroundColor Red
+        exit 1
+    }
+} catch {
+    Write-Host "[FAIL] a gate script could not run: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host '       both checks need `python` on PATH (check_pkg_clean.py also needs PyInstaller)' -ForegroundColor Red
+    exit 1
+} finally {
+    Pop-Location
+}
+Write-Host '[ok] both gates passed - safe to publish' -ForegroundColor Green
 
 # ---------- 1) token ----------
 $token = $null

@@ -6,15 +6,21 @@ Run on a machine that already has Python + PyQt5 (i.e. your own PC):
 Output:
     dist/桌面隐翅虫.exe     <- the app
     dist/relay.txt          <- relay address (editable if the Tailscale IP changes)
+    dist/build_info.json    <- build fingerprint (see below)
     dist/给同事的说明.txt     <- what to send her
     桌面隐翅虫.exe.zip       <- send THIS to her
 """
+import datetime
+import hashlib
+import json
 import os
 import shutil
 import subprocess
 import sys
 import zipfile
 from pathlib import Path
+
+from build_inputs import repo_fingerprint, script_fingerprint
 
 ROOT = Path(__file__).resolve().parent
 GUEST = ROOT.parent / "bug_pet_guest"
@@ -111,6 +117,30 @@ exe = dist / "桌面隐翅虫.exe"
 if not exe.exists():
     print("[build] !! exe not produced - see the PyInstaller log above")
     sys.exit(1)
+
+# ---- 4b) stamp the build fingerprint ----
+# dist/ is wiped in step 4, so this must run after PyInstaller finished.
+# The fingerprint answers one question for the release gate
+# (check_exe_version.py): "was this exe built from the source as it stands
+# right now?"  It records the SHA-256 of every repo file the build consumes
+# (build_inputs.py, so build and check share one definition of "the
+# source"), of the build scripts themselves, and of the finished exe.
+# build_full_pkg.py ships this file inside the published package, so the
+# check runs against the real artifact instead of a rebuilt copy.
+fingerprint = {
+    "built_at": datetime.datetime.now().isoformat(timespec="seconds"),
+    "python": sys.version.split()[0],
+    "relay_url": URL,
+    "bake_real_ip": BAKE_REAL_IP,
+    "repo": repo_fingerprint(),
+    "scripts": script_fingerprint(),
+    "exe_sha256": hashlib.sha256(exe.read_bytes()).hexdigest(),
+    "exe_size": exe.stat().st_size,
+}
+(dist / "build_info.json").write_text(
+    json.dumps(fingerprint, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+print(f"[build] fingerprint : dist/build_info.json "
+      f"({len(fingerprint['repo'])} repo files + exe hashed)")
 
 # ---- 5) put the editable relay address + instructions beside the exe ----
 (dist / "relay.txt").write_text(URL + "\n", encoding="utf-8")

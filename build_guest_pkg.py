@@ -12,6 +12,8 @@ from pathlib import Path
 
 from PIL import Image
 
+from build_inputs import FOG, SPRITES
+
 SRC = Path(__file__).resolve().parent          # .../bug_pet/
 SRC_SRC = SRC / "src"
 OUT = SRC.parent / "bug_pet_guest"
@@ -57,16 +59,17 @@ shutil.copy2(SRC_SRC / "net_relay.py", OUT / "src" / "net_relay.py")
     "PyQt5>=5.15\nPillow>=10.0\nwebsockets>=12.0\n", encoding="utf-8")
 
 # ---- 2) bug sprites -> 512x512 RGBA PNG ----
-for name in ("walk_wings_left", "walk_wings_right",
-             "flap_1_open", "flap_2_spread", "flap_3_down", "flap_4_folded"):
-    im = Image.open(SRC / "sprites" / (name + ".png")).convert("RGBA")
+# The file lists come from build_inputs.py so they can never drift from what
+# the build fingerprint (build_exe.py) claims the build consumes.
+for rel in SPRITES:
+    im = Image.open(SRC / rel).convert("RGBA")
     im = im.resize((512, 512), Image.LANCZOS)
-    im.save(OUT / "sprites" / (name + ".png"), optimize=True)
+    im.save(OUT / rel, optimize=True)
 
 # ---- 3) fog frames -> JPEG q85 ----
-for i in range(6):
-    im = Image.open(SRC / "sprites" / "fog_bg" / f"fog_bg_{i}.png").convert("RGB")
-    im.save(OUT / "sprites" / "fog_bg" / f"fog_bg_{i}.jpg", quality=85, optimize=True)
+for rel in FOG:
+    im = Image.open(SRC / rel).convert("RGB")
+    im.save(OUT / (os.path.splitext(rel)[0] + ".jpg"), quality=85, optimize=True)
 
 # ---- 4) launcher ----
 (OUT / "启动.bat").write_text(f'''@echo off

@@ -9,6 +9,7 @@ Produces:
 Package contents:
     桌面隐翅虫.exe
     relay.txt                        relay address (editable if the IP changes)
+    build_info.json                  build fingerprint (what check_exe_version.py verifies)
     房间壁纸.jpg                      the room wallpaper (re-encoded, ~3 MB)
     备份-原壁纸.txt                   HER original wallpaper, saved on first run
     双击我-开始玩.bat                 backup + apply wallpaper + launch the pet
@@ -59,6 +60,12 @@ def main():
                 os.rmdir(os.path.join(root, name))
     PKG.mkdir(parents=True, exist_ok=True)
     shutil.copy2(exe, PKG / "桌面隐翅虫.exe")
+
+    # The build fingerprint travels with the package: it is what
+    # check_exe_version.py verifies against, and by construction it holds
+    # only hashes, a timestamp and the placeholder relay address -- never a
+    # real one (build_exe.py forces bake_real_ip off for this package).
+    shutil.copy2(DIST / "build_info.json", PKG / "build_info.json")
 
     # NOTE: do NOT copy dist/relay.txt here. net_relay.py writes the machine's
     # REAL Tailscale address into it, and this package is published publicly, so
