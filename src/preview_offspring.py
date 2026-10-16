@@ -19,10 +19,12 @@ from PyQt5.QtGui import QPainter, QPixmap, QImage, QColor, QFont
 from PyQt5.QtCore import Qt
 
 import room_overlay as R
+import _qa_fonts
 
 out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "preview_pupa.png")
 
 app = QApplication(sys.argv)
+print("fonts available:", len(_qa_fonts.load()))
 
 # backdrop: sample the wallpaper right where the nest sits (0.873, 0.450)
 wp_path = os.path.join(ROOT, "wallpaper", "bug_room_wallpaper_1920x1080.png")

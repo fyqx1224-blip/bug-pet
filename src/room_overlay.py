@@ -21,6 +21,7 @@ import json
 import math
 import os
 import random
+import shutil
 import sys
 import threading
 import time
@@ -99,6 +100,25 @@ AUTOSAVE_SECONDS = 20.0        # periodic auto-save cadence
 # clock can't explode the values).  Set BUG_PET_OFFLINE_CATCHUP=0 to disable.
 OFFLINE_CATCHUP = os.environ.get("BUG_PET_OFFLINE_CATCHUP", "1") not in ("", "0", "false")
 OFFLINE_CATCHUP_MAX = 7 * 24 * 3600   # clamp offline elapsed to 7 days
+
+
+def _live_save_is_protected() -> bool:
+    """True when this process is a test harness that forgot to isolate itself.
+
+    Every test must point BUG_SAVE at a temp path (see _testenv.py).  A test
+    that does not would otherwise load and then overwrite the player's real
+    save -- and test_logic.py drives a full mating, so it would lay a brand new
+    egg straight over a developing offspring.  That is exactly how a 成长期
+    pet "went back" to 卵期, so the write is now refused outright.
+    """
+    if os.environ.get("BUG_SAVE"):
+        return False                     # explicitly isolated -> fine
+    try:
+        import __main__
+        name = os.path.basename(getattr(__main__, "__file__", "") or "")
+    except Exception:
+        return False
+    return name.startswith("test_")
 
 
 def _save_path() -> Path:
@@ -1332,19 +1352,245 @@ class Offspring:
         p.restore()
 
     def _draw_beetle(self, p, cx, cy, s):
+        """Adult rove beetle -- the form the whole life cycle grows into.
+
+        The proportions below are measured off `sprites/walk_right.png`, whose
+        body is 673 px long.  As fractions of that length the layout is
+
+            head    0.000 - 0.146   round, half-height 0.40 H
+            neck    0.146 - 0.168   pinched, 0.26 H
+            pronotum 0.160 - 0.300  red shield, 0.43 H
+            elytra  0.294 - 0.510   SHORT black covers, 0.62 H (the tallest
+                                    part of the body -- it forms a hump)
+            abdomen 0.300 - 0.866   banded orange, 0.51 H
+            tail    0.866 - 1.000   black cone, tapering to 0.19 H
+
+        Colours are sampled from the same sprite, so the offspring visibly
+        grows up into its parent rather than into a generic blob.
+
+        It also has to keep moving: this was the only stage that ignored
+        `anim_t`, and `tick()` returns early once ADULT is reached, so a grown
+        beetle used to sit there as a frozen silhouette."""
         p.save()
-        col = QColor(60, 70, 50)
-        p.setPen(QPen(col, 1.6))
-        p.setBrush(col)
-        p.drawEllipse(QPointF(cx, cy), 24 * s, 11 * s)        # body
-        p.drawEllipse(QPointF(cx - 22 * s, cy), 7 * s, 7 * s)  # head
-        p.setPen(QPen(col, 1.2))
-        p.drawLine(QPointF(cx - 26 * s, cy - 4 * s),
-                   QPointF(cx - 34 * s, cy - 10 * s))          # antennae
-        p.drawLine(QPointF(cx - 26 * s, cy + 4 * s),
-                   QPointF(cx - 34 * s, cy + 10 * s))
-        p.drawLine(QPointF(cx - 4 * s, cy - 9 * s),
-                   QPointF(cx + 18 * s, cy))                   # wing split
+        # ---- idle motion ---------------------------------------------------
+        burst = self.anim_t % 6.0
+        flutter = math.sin(burst / 1.2 * math.pi) ** 2 if burst < 1.2 else 0.0
+        breath = 1.0 + 0.03 * math.sin(self.anim_t * 0.9)
+        sway = math.sin(self.anim_t * 1.7) * 0.055 + math.sin(self.anim_t * 3.9) * 0.022
+
+        L = 64.0 * s                     # nose-to-tail length
+        H = 12.2 * s * breath            # vertical unit (NOT the half-height)
+        x0 = cx - L * 0.40               # antennae stick out to the left
+        y0 = cy - 1.5 * s * flutter      # the body lifts during a flutter
+
+        # The pet's sprite stands head-high and tail-low.  A perfectly level
+        # beetle reads as stiff, so the whole body is rotated ~5 deg about its
+        # own centre -- head end up, tail end down.
+        _a = math.radians(5.0)
+        _ca, _sa = math.cos(_a), math.sin(_a)
+
+        def xy(fx, fy):
+            dx, dy = L * (fx - 0.5), H * fy
+            return (x0 + L * 0.5 + dx * _ca - dy * _sa,
+                    y0 + dx * _sa + dy * _ca)
+
+        def pt(fx, fy):
+            return QPointF(*xy(fx, fy))
+
+        # palette sampled from sprites/walk_right.png
+        head_c = QColor(198, 60, 34)
+        pro_c = QColor(184, 48, 28)
+        abdo_c = QColor(214, 92, 46)
+        band_c = QColor(146, 44, 20)
+        black = QColor(38, 33, 30)
+        eye_c = QColor(22, 18, 16)
+        leg_hi = QColor(202, 100, 48)
+        leg_lo = QColor(46, 40, 35)
+        rim = QColor(118, 30, 16)
+
+        # ---- far-side legs first, so the body overlaps them ----------------
+        p.setPen(QPen(leg_lo.lighter(150), 1.4 * s, Qt.SolidLine, Qt.RoundCap))
+        for fx, k in ((0.320, 0.92), (0.460, 1.00), (0.600, 0.94)):
+            p.drawLine(pt(fx, 0.30), pt(fx - 0.048, 0.84 * k))
+            p.drawLine(pt(fx - 0.048, 0.84 * k), pt(fx + 0.020, 1.46 * k))
+
+        # ---- abdomen: long, plated, tapering to the black tail -------------
+        abdo = QPainterPath()
+        abdo.moveTo(*xy(0.300, -0.36))
+        abdo.cubicTo(*xy(0.380, -0.52), *xy(0.520, -0.53), *xy(0.640, -0.52))
+        abdo.cubicTo(*xy(0.760, -0.51), *xy(0.852, -0.47), *xy(0.920, -0.34))
+        abdo.cubicTo(*xy(0.972, -0.23), *xy(1.000, -0.11), *xy(1.005, 0.0))
+        abdo.cubicTo(*xy(1.000, 0.11), *xy(0.972, 0.23), *xy(0.920, 0.34))
+        abdo.cubicTo(*xy(0.852, 0.47), *xy(0.760, 0.51), *xy(0.640, 0.52))
+        abdo.cubicTo(*xy(0.520, 0.53), *xy(0.380, 0.52), *xy(0.300, 0.36))
+        abdo.closeSubpath()
+        ag = QLinearGradient(0, y0 - H * 0.53, 0, y0 + H * 0.53)
+        ag.setColorAt(0.0, abdo_c.lighter(118))
+        ag.setColorAt(0.55, abdo_c)
+        ag.setColorAt(1.0, abdo_c.darker(136))
+        p.setPen(QPen(band_c.darker(130), 1.0))
+        p.setBrush(ag)
+        p.drawPath(abdo)
+
+        p.save()
+        p.setClipPath(abdo)          # plates + tail stay inside the outline
+        # Tergites.  Without these the abdomen is one smooth cone and the
+        # beetle stops looking like the sprite it grew out of.  Kept faint so
+        # the gradient above still carries the shading.
+        bounds = [0.330 + i * 0.055 for i in range(12)]
+
+        def _bow(fx, span=0.032, reach=0.80):
+            q = QPainterPath()
+            q.moveTo(*xy(fx, -reach))
+            q.quadTo(*xy(fx + span, 0.0), *xy(fx, reach))
+            return q
+
+        p.setPen(Qt.NoPen)
+        for i in range(len(bounds) - 1):
+            a, b = bounds[i], bounds[i + 1]
+            plate = QPainterPath()
+            plate.moveTo(*xy(a, -0.80))
+            plate.quadTo(*xy(a + 0.032, 0.0), *xy(a, 0.80))
+            plate.lineTo(*xy(b, 0.80))
+            plate.quadTo(*xy(b + 0.032, 0.0), *xy(b, -0.80))
+            plate.closeSubpath()
+            p.setBrush(QColor(255, 255, 255, 26) if i % 2 == 0
+                       else QColor(70, 24, 12, 30))
+            p.drawPath(plate)
+        p.setPen(QPen(band_c.darker(126), 0.8))
+        p.setBrush(Qt.NoBrush)
+        for fx in bounds:
+            p.drawPath(_bow(fx))
+        tip = QPainterPath()             # the black tail cone
+        tip.moveTo(*xy(0.866, -0.80))
+        tip.lineTo(*xy(1.12, -0.80))
+        tip.lineTo(*xy(1.12, 0.80))
+        tip.lineTo(*xy(0.866, 0.80))
+        tip.closeSubpath()
+        p.setPen(Qt.NoPen)
+        p.setBrush(black)
+        p.drawPath(tip)
+        sheen = QLinearGradient(0, y0 - H * 0.53, 0, y0 + H * 0.14)
+        sheen.setColorAt(0.0, QColor(255, 255, 255, 92))
+        sheen.setColorAt(1.0, QColor(255, 255, 255, 0))
+        p.setBrush(sheen)
+        p.drawPath(abdo)
+        p.restore()
+
+        # ---- elytra: the SHORT black wing covers (rove-beetle signature) ---
+        # In the sprite these are the TALLEST part of the body -- they form a
+        # hump above the abdomen -- but they only reach halfway down it.
+        ely = QPainterPath()
+        ely.moveTo(*xy(0.292, -0.38))
+        ely.cubicTo(*xy(0.300, -0.62), *xy(0.395, -0.66), *xy(0.470, -0.56))
+        ely.cubicTo(*xy(0.505, -0.50), *xy(0.516, -0.30), *xy(0.516, -0.10))
+        ely.cubicTo(*xy(0.452, 0.52), *xy(0.342, 0.50), *xy(0.328, 0.28))
+        ely.closeSubpath()
+        p.save()
+        p.translate(0, -1.2 * s * flutter)      # covers crack open on a flutter
+        eg = QLinearGradient(0, y0 - H * 0.66, 0, y0 + H * 0.50)
+        eg.setColorAt(0.0, black.lighter(235))
+        eg.setColorAt(0.42, black.lighter(130))
+        eg.setColorAt(1.0, black.darker(112))
+        p.setPen(QPen(QColor(16, 13, 11), 1.1))
+        p.setBrush(eg)
+        p.drawPath(ely)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, 70))
+        p.drawEllipse(pt(0.362, -0.36), L * 0.052, H * 0.12)
+        p.restore()
+
+        # ---- pronotum: the red-orange thorax shield ------------------------
+        pro = QPainterPath()
+        pro.moveTo(*xy(0.152, -0.26))
+        pro.cubicTo(*xy(0.162, -0.44), *xy(0.235, -0.48), *xy(0.272, -0.38))
+        pro.cubicTo(*xy(0.296, -0.30), *xy(0.302, -0.14), *xy(0.302, 0.0))
+        pro.cubicTo(*xy(0.302, 0.14), *xy(0.296, 0.30), *xy(0.272, 0.38))
+        pro.cubicTo(*xy(0.235, 0.48), *xy(0.162, 0.44), *xy(0.152, 0.26))
+        pro.closeSubpath()
+        pg = QLinearGradient(0, y0 - H * 0.44, 0, y0 + H * 0.44)
+        pg.setColorAt(0.0, pro_c.lighter(126))
+        pg.setColorAt(0.55, pro_c)
+        pg.setColorAt(1.0, pro_c.darker(134))
+        p.setPen(QPen(rim, 1.2))
+        p.setBrush(pg)
+        p.drawPath(pro)
+
+        # ---- head, on a pinched neck --------------------------------------
+        neck = QPainterPath()
+        neck.moveTo(*xy(0.118, -0.24))
+        neck.lineTo(*xy(0.178, -0.27))
+        neck.lineTo(*xy(0.178, 0.27))
+        neck.lineTo(*xy(0.118, 0.24))
+        neck.closeSubpath()
+        p.setPen(Qt.NoPen)
+        p.setBrush(rim.darker(114))
+        p.drawPath(neck)
+
+        hd = QPainterPath()
+        hd.moveTo(*xy(0.018, -0.20))
+        hd.cubicTo(*xy(0.026, -0.38), *xy(0.070, -0.44), *xy(0.112, -0.39))
+        hd.cubicTo(*xy(0.142, -0.35), *xy(0.152, -0.22), *xy(0.152, 0.0))
+        hd.cubicTo(*xy(0.152, 0.22), *xy(0.142, 0.35), *xy(0.112, 0.39))
+        hd.cubicTo(*xy(0.070, 0.44), *xy(0.026, 0.38), *xy(0.018, 0.20))
+        hd.closeSubpath()
+        hg = QLinearGradient(0, y0 - H * 0.44, 0, y0 + H * 0.44)
+        hg.setColorAt(0.0, head_c.lighter(124))
+        hg.setColorAt(0.6, head_c)
+        hg.setColorAt(1.0, head_c.darker(134))
+        p.setPen(QPen(rim, 1.1))
+        p.setBrush(hg)
+        p.drawPath(hd)
+
+        p.setPen(Qt.NoPen)               # eye + specular dot
+        p.setBrush(eye_c)
+        p.drawEllipse(pt(0.098, -0.14), L * 0.017, H * 0.115)
+        p.setBrush(QColor(255, 255, 255, 160))
+        p.drawEllipse(pt(0.092, -0.18), 0.8 * s, 0.8 * s)
+        p.setPen(QPen(rim.darker(115), 1.1))   # mandibles
+        p.drawLine(pt(0.024, -0.04), pt(-0.012, -0.11))
+        p.drawLine(pt(0.024, 0.04), pt(-0.012, 0.11))
+
+        # ---- antennae: long, beaded, sweeping forward and up ---------------
+        # Control point sits near the head, so each antenna leaves the head
+        # almost straight and then curves away -- a symmetric Bezier here
+        # renders as two rigid rods.
+        for dy, k in ((-1, 1.0), (1, 0.62)):
+            a0 = (0.030, dy * 0.15)
+            a1 = (-0.055, dy * (0.40 + sway * 1.4))
+            a2 = (-0.255, dy * (1.00 + sway * 2.6) * k)
+            seg = []
+            for i in range(11):          # sampled quadratic Bezier -> beads
+                t = i / 10.0
+                u = 1.0 - t
+                seg.append((u * u * a0[0] + 2 * u * t * a1[0] + t * t * a2[0],
+                            u * u * a0[1] + 2 * u * t * a1[1] + t * t * a2[1]))
+            shaft = QPainterPath()
+            shaft.moveTo(*xy(*seg[0]))
+            for q in seg[1:]:
+                shaft.lineTo(*xy(*q))
+            p.setPen(QPen(leg_lo, 1.1 * s, Qt.SolidLine, Qt.RoundCap))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(shaft)
+            p.setPen(Qt.NoPen)
+            p.setBrush(leg_lo)
+            for i, q in enumerate(seg[1:], start=1):
+                # moniliform: the beads shrink toward the tip
+                r = (1.20 - 0.048 * i) * s
+                p.drawEllipse(pt(*q), r, r)
+
+        # ---- near-side legs: orange femur, dark tibia, short tarsus --------
+        # The sprite's feet reach ~0.23 L below the abdomen, i.e. fy ~ 1.6.
+        for fx, tx, ty in ((0.258, 0.202, 1.54),
+                           (0.402, 0.352, 1.74),
+                           (0.548, 0.620, 1.56)):
+            knee = (fx - 0.052, 0.86)
+            p.setPen(QPen(leg_hi, 3.0 * s, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(pt(fx, 0.30), pt(*knee))
+            p.setPen(QPen(leg_lo, 1.8 * s, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(pt(*knee), pt(tx, ty))
+            p.setPen(QPen(leg_lo, 1.0 * s, Qt.SolidLine, Qt.RoundCap))
+            p.drawLine(pt(tx, ty), pt(tx + 0.042, ty + 0.14))
         p.restore()
 
     def draw_panel(self, p: QPainter, rect: QRectF):
@@ -1363,6 +1609,14 @@ class Offspring:
         p.setFont(QFont("Microsoft YaHei", 9))
         p.setPen(QColor(220, 230, 240))
         p.drawText(QPointF(rect.x() + 46, rect.y() + 16), self.stage_name())
+        if self.stage == self.STAGE_ADULT:
+            # A 100%-full bar reads as "still loading, never finishes", which
+            # is exactly what made a grown pet look stuck.  Say it in words.
+            p.setPen(QColor(150, 220, 170))
+            p.drawText(QPointF(rect.x() + 10, rect.y() + 34),
+                       "已成年 · 满值后右键可再召唤伴侣，养下一窝")
+            p.restore()
+            return
         bar_x = rect.x() + 10
         bar_w = rect.width() - 20
         by = rect.y() + 26
@@ -1675,17 +1929,14 @@ class InfoButton:
         p.drawText(QRectF(self.rect), Qt.AlignCenter, "i")
         p.restore()
 
-    def _draw_help(self, p: QPainter):
-        p.setOpacity(0.94)
-        panel = QRectF(40, 80, 460, 360)
-        path = QPainterPath()
-        path.addRoundedRect(panel, 14, 14)
-        p.fillPath(path, QColor(18, 24, 32, 235))
-        p.setPen(QPen(QColor(120, 200, 255, 180), 1))
-        p.drawPath(path)
-        p.setPen(QColor(220, 235, 255))
-        p.setFont(QFont("Microsoft YaHei", 11))
-        lines = [
+    HELP_LINE_H = 26        # baseline-to-baseline
+    HELP_PAD_TOP = 32
+    HELP_PAD_BOTTOM = 16
+
+    def _help_lines(self):
+        """The help text.  Separate from the painter so the panel can be sized
+        from it -- and so a test can assert the last line still fits."""
+        return [
             "隐翅虫 · 互动房间",
             "",
             "• 按底部叶片按钮 → 盒子里起雾（带渐变）",
@@ -1699,10 +1950,31 @@ class InfoButton:
             "• 右键虫子 → 联机：加入房间，即可与同事跨电脑互动、远程交配",
             "• 加房可输入房间码，或直接粘 ws://…地址（IP 变了时用）",
             "• 交配约 10 秒后，发起方窝里出现虫卵（卵→孵化→幼虫→成长→成虫）",
+            "• 养到成年后它留在窝里活动；再满值召唤一次即可换下一窝",
             "• 右键虫子 → 菜单；F1 → 帮助；Esc → 退出",
             "",
             "桌面空白处仍可点击（区域穿透）",
         ]
+
+    def _help_panel_rect(self):
+        """Size the panel from the content.  It used to be a fixed 360 px tall,
+        which already pushed the last two lines outside the box; deriving it
+        means adding a line can never make that worse."""
+        n = len(self._help_lines())
+        h = self.HELP_PAD_TOP + (n - 1) * self.HELP_LINE_H + self.HELP_PAD_BOTTOM
+        return QRectF(40, 80, 470, h)
+
+    def _draw_help(self, p: QPainter):
+        p.setOpacity(0.94)
+        lines = self._help_lines()
+        panel = self._help_panel_rect()
+        path = QPainterPath()
+        path.addRoundedRect(panel, 14, 14)
+        p.fillPath(path, QColor(18, 24, 32, 235))
+        p.setPen(QPen(QColor(120, 200, 255, 180), 1))
+        p.drawPath(path)
+        p.setPen(QColor(220, 235, 255))
+        p.setFont(QFont("Microsoft YaHei", 11))
         for i, line in enumerate(lines):
             f = QFont("Microsoft YaHei", 13 if i == 0 else 11,
                       QFont.Bold if i == 0 else QFont.Normal)
@@ -1711,7 +1983,8 @@ class InfoButton:
                 p.setPen(QColor(140, 220, 255))
             else:
                 p.setPen(QColor(220, 235, 255))
-            p.drawText(QPointF(panel.x() + 20, panel.y() + 32 + i * 26), line)
+            p.drawText(QPointF(panel.x() + 20,
+                               panel.y() + self.HELP_PAD_TOP + i * self.HELP_LINE_H), line)
 
 
 # ===================== Fog button =====================
@@ -1846,8 +2119,8 @@ class RoomOverlay(QWidget):
         self._net_inbox = []      # thread-safe msg buffer (processed in _tick)
         self._net_send_counter = 0
         # transient on-screen net status toast (so joining is never silent)
-        self._net_toast_text = ""
-        self._net_toast_until = 0.0
+        self._toast_text = ""
+        self._toast_until = 0.0
         self._net_ok_noted = False    # already toasted "connected"
         self._net_fail_noted = False  # already toasted "retrying"
         self._peer_seen = False       # peer's first snapshot received
@@ -1877,11 +2150,19 @@ class RoomOverlay(QWidget):
         # auto-save accumulator
         self._save_accum = 0.0
         # restore the previous session (bug pos, stats, offspring progress)
+        loaded_ok = True
         try:
             self._load_save()
         except Exception as e:
+            loaded_ok = False
             print("[save] load failed:", e)
-        self._save_game()   # stamp a fresh save so ts tracks this launch
+        if loaded_ok:
+            self._save_game()   # stamp a fresh save so ts tracks this launch
+        else:
+            # Never overwrite a save we could not read.  Doing so used to cost
+            # the only copy of the offspring's progress on one bad parse.
+            print("[save] previous save.json left untouched "
+                  "(a fallback copy lives at save.json.bak)")
 
     # ---------- setup ----------
     def _setup_window(self):
@@ -2029,14 +2310,14 @@ class RoomOverlay(QWidget):
                 # first successful connection -> tell the user
                 self._net_ok_noted = True
                 self._net_fail_noted = False
-                self._net_toast(
+                self._toast(
                     f"联机：已连接（房间 {self.net.room}），等对方进来 …", 6.0)
         elif self.net is not None and not self._net_fail_noted:
             # still not connected ~2 game-seconds after joining -> warn (once)
             self._net_wait += DT
             if self._net_wait > 2.0:
                 self._net_fail_noted = True
-                self._net_toast(
+                self._toast(
                     "联机：连不上中继，后台自动重试中 …", 6.0)
         if self._net_inbox:
             inbox = self._net_inbox[:]
@@ -2342,21 +2623,51 @@ class RoomOverlay(QWidget):
         }
 
     def _save_game(self):
+        if _live_save_is_protected():
+            print("[save] REFUSED to write the live save from a test process "
+                  "(%s).  Set BUG_SAVE to a temp path." % _save_path())
+            return
         try:
             data = self._gather_save()
-            tmp = _save_path().with_suffix(".json.tmp")
+            p = _save_path()
+            tmp = p.with_suffix(".json.tmp")
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, _save_path())   # atomic-ish: avoid a torn file
+            # Keep exactly ONE generation back.  A single unreadable/torn save
+            # used to be unrecoverable because the next launch stamped a fresh
+            # file straight over it; now there is always a fallback.
+            if p.exists():
+                try:
+                    shutil.copyfile(p, p.with_suffix(".json.bak"))
+                except Exception:
+                    pass
+            os.replace(tmp, p)   # atomic-ish: avoid a torn file
         except Exception as e:
             print("[save] write failed:", e)
 
     def _load_save(self):
         p = _save_path()
-        if not p.exists():
-            return
-        with open(p, "r", encoding="utf-8") as f:
-            d = json.load(f)
+        d = None
+        primary_err = None
+        if p.exists():
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+            except Exception as e:
+                primary_err = e
+                print("[save] %s unreadable (%s); falling back to the backup"
+                      % (p.name, e))
+        if d is None:
+            bak = p.with_suffix(".json.bak")
+            if not bak.exists():
+                if primary_err is not None:
+                    # Nothing to fall back to.  Raise so the caller knows the
+                    # session was NOT restored and must not stamp over the file.
+                    raise primary_err
+                return
+            with open(bak, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            print("[save] restored progress from", bak.name)
         if not isinstance(d, dict) or d.get("ver") != 1:
             return
         # ---- bug ----
@@ -2397,10 +2708,27 @@ class RoomOverlay(QWidget):
         o = d.get("offspring")
         if o:
             self.offspring = Offspring()
+            # `idx` is the durable half of this record: it is a plain integer,
+            # so it survives any change to the STAGE_* string vocabulary.
+            # Use the string when it is recognised, otherwise fall back to
+            # `idx` -- an unrecognised stage used to silently rewind the pet to
+            # 卵期 while keeping its elapsed time, which is exactly what a
+            # "成长期 变回 卵期" report looks like.
             st = o.get("stage")
             if st in Offspring.NAMES:
                 self.offspring.stage = st
                 self.offspring.idx = Offspring.ORDER.index(st)
+            else:
+                try:
+                    idx = int(o.get("idx", 0))
+                except (TypeError, ValueError):
+                    idx = 0
+                idx = max(0, min(idx, len(Offspring.ORDER) - 1))
+                self.offspring.idx = idx
+                self.offspring.stage = Offspring.ORDER[idx]
+                if st is not None:
+                    print("[save] unknown offspring stage %r -> keeping idx=%d (%s)"
+                          % (st, idx, self.offspring.stage))
             self.offspring.t = max(0.0, float(o.get("t", 0.0)))
             self.offspring.done = bool(o.get("done", False))
             if self.offspring.done:
@@ -2433,6 +2761,13 @@ class RoomOverlay(QWidget):
         """Spawn the clutch in the initiator's nest (called after mating)."""
         if self.offspring is None:
             self.offspring = Offspring()
+        elif self.offspring.done:
+            # The previous clutch is already adult and merely sitting in the
+            # nest.  A second mating has to actually produce a new egg: this
+            # used to fall through silently, so the whole courtship played out
+            # and then nothing appeared -- indistinguishable from a bug.
+            self.offspring = Offspring()
+            self._toast("成年虫飞走了，窝里换上新的一窝卵", 6.0)
 
     # ---------- cross-PC play (Phase 4) ----------
     def connect_room(self, room: str, name: str, color: str = "#85B7EB",
@@ -2441,7 +2776,7 @@ class RoomOverlay(QWidget):
         `url` defaults to the resolved RELAY_URL; pass one to override."""
         if not HAVE_WEBSOCKETS:
             print("[net] websockets not installed; offline mode only")
-            self._net_toast("联机不可用：此构建缺少 websockets 组件", 6.0)
+            self._toast("联机不可用：此构建缺少 websockets 组件", 6.0)
             return
         if self.net is not None:
             if self.net.connected:
@@ -2462,13 +2797,14 @@ class RoomOverlay(QWidget):
         if self.remote_bug is None:
             self.remote_bug = Bug(SPRITES_DIR)
             self.remote_bug.remote = True
-        self._net_toast(f"联机：正在连接中继（房间 {room}）…", 5.0)
+        self._toast(f"联机：正在连接中继（房间 {room}）…", 5.0)
 
-    def _net_toast(self, text: str, seconds: float = 5.0):
-        """Show a transient status line on the overlay (net events are
-        otherwise completely silent, which looks like "nothing happened")."""
-        self._net_toast_text = text
-        self._net_toast_until = time.time() + seconds
+    def _toast(self, text: str, seconds: float = 5.0):
+        """Show a transient status line on the overlay.  Anything that happens
+        without a visible change on screen must say so here -- a silent
+        no-op is indistinguishable from a bug."""
+        self._toast_text = text
+        self._toast_until = time.time() + seconds
         self.update()
 
     def _send_net_state(self):
@@ -2493,7 +2829,7 @@ class RoomOverlay(QWidget):
                 self.remote_bug.remote = True
             if not self._peer_seen:
                 self._peer_seen = True
-                self._net_toast("对方进入房间了！拖到一起养吧", 5.0)
+                self._toast("对方进入房间了！拖到一起养吧", 5.0)
             self.remote_bug.apply_snapshot(msg)
         elif t == "mate_req":
             # Peer wants to mate. Auto-accept: generate a shared seed & midpoint
@@ -2523,7 +2859,7 @@ class RoomOverlay(QWidget):
         elif t == "bye":
             self.remote_bug = None
             self._peer_seen = False
-            self._net_toast("对方已离开房间", 4.0)
+            self._toast("对方已离开房间", 4.0)
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -2586,8 +2922,8 @@ class RoomOverlay(QWidget):
                               r.width(), 44)
             self.offspring.draw_panel(p, egg_rect)
         # 9c) Transient net status toast (join / retry / peer arrive / leave)
-        if self._net_toast_text and time.time() < self._net_toast_until:
-            self._draw_net_toast(p)
+        if self._toast_text and time.time() < self._toast_until:
+            self._draw_toast(p)
         # 10) Info button + help (help panel via F1; 'i' glyph off by default)
         self.info.draw(p)
         # 10b) Drop-zone guides (for machines without the room wallpaper)
@@ -2606,10 +2942,10 @@ class RoomOverlay(QWidget):
             self._draw_proximity_outline(p)
 
     # ---------- drop-zone guides (no-wallpaper machines) ----------
-    def _draw_net_toast(self, p: QPainter):
-        """Small centred status line for cross-PC events (semi-transparent,
-        top of screen, auto-expires)."""
-        text = self._net_toast_text
+    def _draw_toast(self, p: QPainter):
+        """Small centred status line (semi-transparent, top of screen,
+        auto-expires)."""
+        text = self._toast_text
         # rough width: CJK ~15px, latin ~8px at 12pt bold
         px = sum(15 if ord(ch) > 0x2E80 else 8 for ch in text)
         bw = min(max(px + 44, 200), self.sw - 40)

@@ -29,8 +29,10 @@ from PyQt5.QtWidgets import QApplication          # noqa: E402
 from PyQt5.QtGui import QImage, QPainter, QPixmap  # noqa: E402
 from PyQt5.QtCore import Qt                        # noqa: E402
 import room_overlay as R                           # noqa: E402
+import _qa_fonts                                   # noqa: E402
 
 app = QApplication(sys.argv)
+print("fonts available:", len(_qa_fonts.load()))
 w = R.RoomOverlay()
 w.show()
 app.processEvents()

@@ -1,6 +1,7 @@
 """Logic test for Phase 3 using the PyQt5 shim (no display needed)."""
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
+import _testenv  # noqa: F401  (isolates BUG_SAVE before room_overlay is imported)
 import pyqt_stub  # noqa: F401  (registers fake PyQt5 before import)
 import room_overlay as R
 from PyQt5.QtCore import QPoint, QPointF
@@ -74,6 +75,12 @@ assert w.offspring.done, "offspring never reached ADULT"
 
 # ---- 6) re-summon guard: blocked while a clutch is developing/done ----
 # (we just laid one that is already adult; allow a fresh mating cycle)
+# put the real pacing back so the second clutch stays an egg while we tick
+R.Offspring.DURATIONS = {
+    R.Offspring.STAGE_EGG: R.EGG_PERIOD, R.Offspring.STAGE_HATCH: R.HATCH_PERIOD,
+    R.Offspring.STAGE_LARVA: R.LARVA_PERIOD, R.Offspring.STAGE_GROWTH: R.GROWTH_PERIOD,
+    R.Offspring.STAGE_ADULT: float("inf"),
+}
 w.hud.fullness = w.hud.energy = w.hud.happy = 1.0
 w.hud.decay()
 # kill the mate + mating so a new summon is permitted
@@ -82,6 +89,21 @@ w.mating = None
 w._summon_mate()
 assert w.mate is not None, "re-summon blocked unexpectedly"
 print("[6] re-summon (after clearing mate) works =", w.mate is not None)
+
+# ---- 6b) the second mating must actually lay a new egg ----
+# This used to be a silent dead end: _lay_egg() only ran when offspring was
+# None, so the adult sat in the nest forever and a second courtship produced
+# nothing at all.
+adult = w.offspring
+for _ in range(3000):
+    w._tick()
+    if w.mating is None:
+        break
+assert w.offspring is not adult, "second mating did not replace the adult clutch"
+assert w.offspring.stage == R.Offspring.STAGE_EGG, w.offspring.stage
+assert not w.offspring.done
+print("[6b] second mating laid a new egg: stage =", w.offspring.stage_name(),
+      "| 巢里的成年虫已让位 =", w.offspring is not adult)
 
 # ---- 7) summon blocked when NOT in heat ----
 w.mate = None; w.mating = None; w.offspring = None
