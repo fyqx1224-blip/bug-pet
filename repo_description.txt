@@ -1,1 +1,1 @@
-桌面隐翅虫，上班摸鱼养桌宠 🪲 PyQt5 透明置顶桌宠：自动散步/起飞/喂食/睡觉/训练/求偶产卵，支持 Tailscale 双机联机共养后代。解压即玩，无需装 Python：https://github.com/fyqx1224-blip/bug-pet/releases/latest
+桌面隐翅虫，上班摸鱼养桌宠 🪲 PyQt5 透明置顶桌宠：自动散步/起飞/喂食/睡觉/训练/求偶产卵/后代盲盒，支持 Tailscale 双机联机共养后代。解压即玩，无需装 Python：https://github.com/fyqx1224-blip/bug-pet/releases/latest
