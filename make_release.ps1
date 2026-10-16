@@ -79,6 +79,11 @@ if (-not (Test-Path -LiteralPath $Zip)) {
 # Two independent gates, both must pass.  A zip that embeds the host's real
 # Tailscale address, or whose exe predates the last commit, must never reach
 # the release -- both mistakes are invisible once the upload succeeds.
+# Gate 2 additionally verifies the exe is COMPLETE: every local module the
+# entry script imports (build_inputs.CODE) must really be inside the
+# archive -- an unresolved import is only a PyInstaller build-time warning,
+# the exe still ships and then crashes at startup (variants.py went missing
+# from one release exactly this way).
 Write-Host '== gate 1/2: package is clean (no real relay address baked in) =='
 Push-Location $Dir
 try {
@@ -87,10 +92,10 @@ try {
         Write-Host '[FAIL] gate 1: the package embeds a real relay address - NOT publishing' -ForegroundColor Red
         exit 1
     }
-    Write-Host '== gate 2/2: exe matches the current source =='
+    Write-Host '== gate 2/2: exe matches the current source and is complete =='
     python check_exe_version.py $Zip
     if ($LASTEXITCODE -ne 0) {
-        Write-Host '[FAIL] gate 2: the exe does not match the current source - rebuild first - NOT publishing' -ForegroundColor Red
+        Write-Host '[FAIL] gate 2: the exe does not match the current source, or is missing a module - rebuild first - NOT publishing' -ForegroundColor Red
         exit 1
     }
 } catch {

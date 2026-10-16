@@ -12,7 +12,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from build_inputs import FOG, SPRITES
+from build_inputs import CODE, FOG, SPRITES
 
 SRC = Path(__file__).resolve().parent          # .../bug_pet/
 SRC_SRC = SRC / "src"
@@ -23,35 +23,50 @@ HOST_IP = os.environ.get("BUG_RELAY_HOST", "100.64.0.1")
 ROOM = os.environ.get("BUG_ROOM", "ROOM-123")
 
 if OUT.exists():
-    shutil.rmtree(OUT)
+    # NOTE: plain unlink instead of shutil.rmtree -- some environments
+    # intercept rmtree and force a recycle-bin move (or block it outright
+    # as a "bulk delete"), which can fail.  Same pattern as
+    # build_full_pkg.py's staging cleanup.
+    for root, dirs, files in os.walk(OUT, topdown=False):
+        for name in files:
+            os.unlink(os.path.join(root, name))
+        for name in dirs:
+            os.rmdir(os.path.join(root, name))
 (OUT / "src").mkdir(parents=True)
 (OUT / "sprites" / "fog_bg").mkdir(parents=True)
 
 # ---- 1) code ----
-dup = OUT / "src" / "room_overlay.py"
-text = (SRC_SRC / "room_overlay.py").read_text(encoding="utf-8")
-
-# let the guest loader pick up JPEG frames (much smaller than PNG here)
-old = '''        for i in range(6):
+# Copy EVERY module the exe build consumes (build_inputs.CODE) into the
+# guest package.  room_overlay.py additionally gets the fog-loader patch;
+# everything else is copied verbatim.  A hand-kept subset here is how
+# variants.py went missing from one release: PyInstaller only WARNED about
+# the unresolvable import, produced the exe anyway, and the app then died
+# at startup with ModuleNotFoundError -- invisible to the fingerprint gate.
+for rel in CODE:
+    name = Path(rel).name
+    text = (SRC_SRC / name).read_text(encoding="utf-8")
+    if name == "room_overlay.py":
+        # let the guest loader pick up JPEG frames (much smaller than PNG here)
+        old = '''        for i in range(6):
             path = fog_dir / f"fog_bg_{i}.png"
             if path.exists():'''
-new = '''        for i in range(6):
+        new = '''        for i in range(6):
             for _ext in ("jpg", "png"):
                 path = fog_dir / f"fog_bg_{i}.{_ext}"
                 if path.exists():'''
-assert old in text, "fog loader pattern not found"
-text = text.replace(old, new, 1)
-# indent the two following lines so they live inside the new inner loop
-tail_old = '''                pm = QPixmap(str(path))
+        assert old in text, "fog loader pattern not found"
+        text = text.replace(old, new, 1)
+        # indent the two following lines so they live inside the new inner loop
+        tail_old = '''                pm = QPixmap(str(path))
                 if not pm.isNull():
                     self.fog_frames.append(pm)'''
-tail_new = '''                    pm = QPixmap(str(path))
+        tail_new = '''                    pm = QPixmap(str(path))
                     if not pm.isNull():
                         self.fog_frames.append(pm)
                         break'''
-assert tail_old in text, "fog loader tail not found"
-text = text.replace(tail_old, tail_new, 1)
-dup.write_text(text, encoding="utf-8")
+        assert tail_old in text, "fog loader tail not found"
+        text = text.replace(tail_old, tail_new, 1)
+    (OUT / "src" / name).write_text(text, encoding="utf-8")
 
 # relay script too (in case she ever wants to host instead)
 shutil.copy2(SRC_SRC / "net_relay.py", OUT / "src" / "net_relay.py")

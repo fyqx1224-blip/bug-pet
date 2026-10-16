@@ -19,8 +19,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 
-# The single app module PyInstaller compiles into the exe.
-CODE = "src/room_overlay.py"
+# The app modules PyInstaller compiles into the exe.  build_guest_pkg.py
+# copies EVERY file listed here into the guest package before the build.
+# Keep the list complete: a module the entry script imports but that never
+# reaches the guest package is only a build-time WARNING for PyInstaller --
+# the exe still gets produced and then dies at startup with
+# ModuleNotFoundError.  (variants.py went missing from one release exactly
+# this way: it was added to room_overlay.py's imports after this list was
+# written and nobody added it here.)
+CODE = (
+    "src/room_overlay.py",
+    "src/variants.py",
+)
 
 # Bug sprites, downscaled to 512x512 RGBA by build_guest_pkg.py.
 # (walk_left.png / walk_right.png are measurement references only -- the
@@ -48,7 +58,7 @@ SCRIPTS = (
 
 def input_files():
     """Every repo file the build consumes, as paths relative to ROOT."""
-    return (CODE,) + SPRITES + FOG
+    return CODE + SPRITES + FOG
 
 
 def sha256(path):
