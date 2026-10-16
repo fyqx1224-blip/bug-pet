@@ -32,8 +32,16 @@ WP_PNG = ROOT / "wallpaper" / "bug_room_wallpaper_1920x1080.png"
 
 def main():
     # ---- 1) build the exe (also refreshes the slim package) ----
-    print("[pkg] building exe ...")
-    subprocess.run([sys.executable, str(ROOT / "build_exe.py")], check=True)
+    # This package is published on a PUBLIC release, so the host's real
+    # Tailscale address must never be baked into it -- see the long note in
+    # build_exe.py.  Force the safe placeholder regardless of what the caller
+    # exported.  The colleague's address goes out-of-band (relay.txt ships with
+    # a placeholder and wins over the baked default at runtime).
+    env = dict(os.environ)
+    env["BUG_BAKE_RELAY_IP"] = "0"
+    print("[pkg] building exe (relay IP NOT baked) ...")
+    subprocess.run([sys.executable, str(ROOT / "build_exe.py")],
+                   check=True, env=env)
 
     exe = DIST / "桌面隐翅虫.exe"
     if not exe.exists():

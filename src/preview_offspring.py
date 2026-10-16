@@ -34,18 +34,21 @@ if not wp.isNull():
     backdrop = QColor(wp.pixel(int(wp.width() * 0.873), int(wp.height() * 0.450)))
 
 O = R.Offspring
+# (label, stage, progress, row height) -- the adult is drawn much larger than
+# the other stages (L=64 vs a ~20px pupa) and its legs hang well below the
+# body, so it needs a taller row or it gets clipped at the sheet's bottom edge.
 CASES = [
-    ("卵期",       O.STAGE_EGG,    0.40),
-    ("孵化后期",   O.STAGE_HATCH,  0.70),
-    ("幼年期",     O.STAGE_LARVA,  0.50),
-    ("成长期 5%",  O.STAGE_GROWTH, 0.05),
-    ("成长期 50%", O.STAGE_GROWTH, 0.50),
-    ("成长期 95%", O.STAGE_GROWTH, 0.95),
-    ("成年期",     O.STAGE_ADULT,  1.00),
+    ("卵期",       O.STAGE_EGG,    0.40, 104),
+    ("孵化后期",   O.STAGE_HATCH,  0.70, 104),
+    ("幼年期",     O.STAGE_LARVA,  0.50, 104),
+    ("成长期 5%",  O.STAGE_GROWTH, 0.05, 104),
+    ("成长期 50%", O.STAGE_GROWTH, 0.50, 104),
+    ("成长期 95%", O.STAGE_GROWTH, 0.95, 104),
+    ("成年期",     O.STAGE_ADULT,  1.00, 210),
 ]
 
-W, ROW, ZOOM = 1000, 104, 3.5
-H = ROW * len(CASES) + 76
+W, ZOOM = 1000, 3.5
+H = sum(c[3] for c in CASES) + 76
 pm = QPixmap(W, H)
 pm.fill(backdrop)
 p = QPainter(pm)
@@ -57,8 +60,9 @@ p.drawText(24, 34, "隐翅虫后代各阶段（左：屏幕实际大小   右：
 p.setPen(QColor(150, 144, 128))
 p.drawText(24, 56, "背景色取自壁纸睡窝区域")
 
-for i, (label, stage, prog) in enumerate(CASES):
-    cy = 76 + i * ROW + ROW * 0.5
+top = 76
+for i, (label, stage, prog, row) in enumerate(CASES):
+    cy = top + row * 0.5
     p.setPen(QColor(120, 112, 96))
     p.setFont(QFont("Microsoft YaHei", 10))
     p.drawText(24, int(cy) + 5, label)
@@ -81,7 +85,8 @@ for i, (label, stage, prog) in enumerate(CASES):
 
     if i:
         p.setPen(QColor(0, 0, 0, 18))
-        p.drawLine(16, int(cy - ROW * 0.5), W - 16, int(cy - ROW * 0.5))
+        p.drawLine(16, int(top), W - 16, int(top))
+    top += row
 
 p.end()
 pm.save(out)

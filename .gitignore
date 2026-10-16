@@ -27,6 +27,8 @@ final_test_*.log
 preview_*.png
 # 排查问题时随手生成的临时探针图（_peek_/_probe_/_mask_probe/_qtimg_probe...）
 _*.png
+# 打包/构建日志（build_full_pkg.py > _build_log.txt，每次构建都会重写）
+_build_log.txt
 # 壁纸合成过程的中间预览图（apply_wallpaper_parallax.py 可随时重新生成）
 wallpaper/_dish_debug*.png
 wallpaper/parallax/00_composite_preview*.png

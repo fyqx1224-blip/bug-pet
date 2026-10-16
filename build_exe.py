@@ -21,6 +21,20 @@ GUEST = ROOT.parent / "bug_pet_guest"
 # NEVER put a real Tailscale IP here - this repository is public.
 FALLBACK_IP = os.environ.get("BUG_RELAY_HOST", "100.64.0.1")
 
+# Baking the host's REAL Tailscale address into the exe makes the colleague's
+# copy connect with zero setup -- but the address then lives inside a binary,
+# and the release zip is public, so anyone can pull it straight back out of
+# room_overlay's compiled constants.  Baking it is therefore OPT-IN, and only
+# for the private hand-off package:
+#
+#     $env:BUG_BAKE_RELAY_IP = "1"
+#     .\build_exe.bat
+#
+# The published 壁纸联机包 never bakes it (build_full_pkg.py forces it off) and
+# ships a placeholder relay.txt instead, which _resolve_relay_url() already
+# prefers over the baked default -- so nothing is lost by not baking.
+BAKE_REAL_IP = os.environ.get("BUG_BAKE_RELAY_IP") == "1"
+
 
 def tailscale_ip() -> str:
     """Find this machine's Tailscale IP (falls back to the last known one)."""
@@ -42,9 +56,10 @@ def tailscale_ip() -> str:
     return FALLBACK_IP
 
 
-ip = tailscale_ip()
+ip = tailscale_ip() if BAKE_REAL_IP else FALLBACK_IP
 URL = f"ws://{ip}:8765"
-print(f"[build] tailscale ip : {ip}")
+print(f"[build] relay ip     : {ip}"
+      + ("" if BAKE_REAL_IP else "  (placeholder, real IP NOT baked)"))
 print(f"[build] relay url    : {URL}")
 
 # ---- 1) refresh the slim package (code + downscaled assets + jpg fog) ----
