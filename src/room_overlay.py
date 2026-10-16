@@ -42,6 +42,10 @@ except Exception:  # optional dependency; offline/single-PC mode still works
     _websockets = None
     HAVE_WEBSOCKETS = False
 
+# Offspring blind box: the variant engine (morph / pattern / size / rarity)
+# lives in its own pure-python module so the roll can be tested without Qt.
+import variants as _variants
+
 # PyInstaller onefile unpacks assets into the temp dir sys._MEIPASS points at,
 # so __file__-relative paths break there.  Resolve the app root once, up front.
 if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
@@ -991,6 +995,10 @@ class StatsHUD:
         self.in_heat = False     # True when all three stats are maxed
         self._anim_t = 0.0       # drives the pulsing "可交配" heart
         self.hover = False
+        # Offspring rarity bonus: multiplies RECOVERY only (caps and decay
+        # rates stay untouched -- a hidden variant is easier to keep, not
+        # stronger).  1.0 when there is no clutch / a plain one.
+        self.recover_mult = 1.0
 
     def rect_hot(self) -> QRectF:
         return self.rect
@@ -1007,17 +1015,18 @@ class StatsHUD:
         # One bite per cooldown window; a meal tops the bar up by EAT_GAIN.
         if self._eat_cd > 0.0:
             return
-        self.fullness = min(1.0, self.fullness + EAT_GAIN)
+        self.fullness = min(1.0, self.fullness + EAT_GAIN * self.recover_mult)
         self.happy = min(1.0, self.happy + 0.10)
         self._eat_cd = EAT_COOLDOWN
 
     def on_sleep(self):
-        self.energy = min(1.0, self.energy + SLEEP_GAIN)
+        self.energy = min(1.0, self.energy + SLEEP_GAIN * self.recover_mult)
         self.happy = min(1.0, self.happy + 0.05)
 
     def on_train(self):
+        # train still COSTS energy / fullness -- only the mood gain scales
         self.energy = max(0.0, self.energy - TRAIN_ENERGY)
-        self.happy = min(1.0, self.happy + TRAIN_HAPPY)
+        self.happy = min(1.0, self.happy + TRAIN_HAPPY * self.recover_mult)
         self.fullness = max(0.0, self.fullness - TRAIN_FULLNESS)
 
     def decay(self, sleeping=False):
@@ -1112,7 +1121,19 @@ class StatsHUD:
 class Offspring:
     """The clutch laid after a mating.  Rove beetles are holometabolous, so
     the offspring runs the full metamorphosis: egg -> hatching -> larva ->
-    growth (pupa + sub-adult) -> adult.  Drawn with vectors (no new sprites)."""
+    growth (pupa + sub-adult) -> adult.  Drawn with vectors (no new sprites).
+
+    Blind box: the clutch's variant (morph / pattern / size / rarity) is
+    rolled when the egg is laid and persisted in the save.  The egg stays
+    visually generic -- the variant is only REVEALED at the hatch moment
+    (HATCH -> LARVA), which is the whole point of the box: while it is an
+    egg you cannot tell what is inside.
+
+    The reveal is a short presentation state machine (~3 s, skippable by
+    clicking).  It pauses the life clock -- a show must never cost the pet
+    development time -- and reports "reveal_start" / "reveal_end" so the
+    controller can toast the banner and record the dex entry.
+    """
     STAGE_EGG = "EGG"
     STAGE_HATCH = "HATCH"
     STAGE_LARVA = "LARVA"
@@ -1127,17 +1148,38 @@ class Offspring:
     SIZE = {STAGE_EGG: 0.55, STAGE_HATCH: 0.65, STAGE_LARVA: 0.85,
             STAGE_GROWTH: 1.05, STAGE_ADULT: 1.25}
 
-    def __init__(self):
+    # Reveal show timing (wall-seconds).  Four beats: shake -> crack ->
+    # rarity flash -> banner, then the life clock resumes.
+    REVEAL_SHAKE = 0.6
+    REVEAL_CRACK = 1.2
+    REVEAL_FLASH = 2.2
+    REVEAL_TOTAL = 3.0
+
+    def __init__(self, genes=None):
         self.stage = self.STAGE_EGG
         self.idx = 0
         self.t = 0.0           # wall-seconds spent in the current stage
         self.anim_t = 0.0
         self.done = False      # has reached the adult stage
+        # blind-box variant (persisted; sanitized on load)
+        self.genes = genes if genes is not None else _variants.roll_variant()
+        self.revealed = False  # the box has been opened at least once
+        self.reveal = None     # active reveal state (dict) or None
 
     def tick(self, dt):
+        """Advance the life cycle.  Returns an event string or None:
+
+            "reveal_start"  the box just opened (toast + dex entry)
+            "reveal_end"    the show finished, the larva is out
+
+        The life clock is PAUSED while a reveal plays, so the show can never
+        eat into the pet's development time.
+        """
         self.anim_t = (self.anim_t + dt) % 10.0
+        if self.reveal is not None:
+            return self._tick_reveal(dt)
         if self.stage == self.STAGE_ADULT:
-            return
+            return None
         self.t += dt
         dur = self.DURATIONS[self.stage]
         if self.t >= dur:
@@ -1146,6 +1188,45 @@ class Offspring:
             self.stage = self.ORDER[self.idx]
             if self.stage == self.STAGE_ADULT:
                 self.done = True
+            elif (self.stage == self.STAGE_LARVA and not self.revealed
+                    and self.reveal is None):
+                # HATCH -> LARVA: the egg cracks open and the box is opened.
+                self._start_reveal()
+                return "reveal_start"
+        return None
+
+    # ---------- reveal show ----------
+    def _start_reveal(self):
+        self.revealed = True
+        self.reveal = {"t": 0.0, "banner": _variants.banner(self.genes)}
+
+    def _tick_reveal(self, dt):
+        r = self.reveal
+        r["t"] += dt
+        if r["t"] >= self.REVEAL_TOTAL:
+            self.reveal = None
+            return "reveal_end"
+        return None
+
+    def skip_reveal(self):
+        """Click-to-skip: end the show now (the larva is simply out)."""
+        if self.reveal is not None:
+            self.reveal = None
+            return "reveal_end"
+        return None
+
+    def reveal_phase(self):
+        """'shake' | 'crack' | 'flash' | 'banner' | None."""
+        if self.reveal is None:
+            return None
+        t = self.reveal["t"]
+        if t < self.REVEAL_SHAKE:
+            return "shake"
+        if t < self.REVEAL_CRACK:
+            return "crack"
+        if t < self.REVEAL_FLASH:
+            return "flash"
+        return "banner"
 
     def progress(self):
         """0..1 within the current stage (adult reports 1.0)."""
@@ -1157,7 +1238,12 @@ class Offspring:
         return self.NAMES[self.stage]
 
     def draw_in_nest(self, p: QPainter, cx, cy):
-        s = self.SIZE[self.stage]
+        s = self.SIZE[self.stage] * _variants.size_scale(self.genes)
+        if self.reveal is not None:
+            # The show plays on the egg itself -- cracked, flashing, and
+            # slowly taking on the variant's colour -- until it ends.
+            self._draw_reveal_egg(p, cx, cy, s)
+            return
         if self.stage in (self.STAGE_EGG, self.STAGE_HATCH):
             self._draw_egg(p, cx, cy, self.stage == self.STAGE_HATCH, s)
         elif self.stage == self.STAGE_LARVA:
@@ -1167,7 +1253,7 @@ class Offspring:
         else:
             self._draw_beetle(p, cx, cy, s)
 
-    def _draw_egg(self, p, cx, cy, hatching, s):
+    def _draw_egg(self, p, cx, cy, hatching, s, wobble=0.0, crack=False):
         p.save()
         pulse = 1.0 + 0.05 * math.sin(self.anim_t * 3)
         w = 22 * s * pulse
@@ -1176,6 +1262,7 @@ class Offspring:
         pen = QPen(QColor(180, 160, 110), 1)
         p.setPen(pen)
         p.setBrush(col)
+        cx += wobble
         p.drawEllipse(QPointF(cx, cy), w, h)
         # papilla at the front (left) tip
         p.drawEllipse(QPointF(cx - w, cy), 2.5, 2.5)
@@ -1183,6 +1270,110 @@ class Offspring:
             p.setPen(QPen(QColor(150, 110, 60), 1.4))
             p.drawArc(QRectF(cx - w * 0.6, cy - h * 0.6, w * 1.2, h * 1.2),
                       200 * 16, 150 * 16)
+        if crack:
+            # the crack: a jagged line across the egg, opening toward the tail
+            p.setPen(QPen(QColor(96, 68, 34), 1.6, Qt.SolidLine,
+                          Qt.RoundCap, Qt.RoundJoin))
+            crack_path = QPainterPath()
+            crack_path.moveTo(cx - w * 0.55, cy - h * 0.15)
+            crack_path.lineTo(cx - w * 0.25, cy + h * 0.10)
+            crack_path.lineTo(cx + w * 0.02, cy - h * 0.12)
+            crack_path.lineTo(cx + w * 0.30, cy + h * 0.14)
+            crack_path.lineTo(cx + w * 0.52, cy - h * 0.05)
+            p.drawPath(crack_path)
+        p.restore()
+
+    def _draw_reveal_egg(self, p, cx, cy, s):
+        """The blind-box show, played on the egg itself.
+
+        shake  -> the egg wobbles side to side (0 - 0.6 s)
+        crack  -> the shell splits, the egg jitters (0.6 - 1.2 s)
+        flash  -> rarity rays burst around the egg and it takes on the
+                  variant's colour (1.2 - 2.2 s)
+        banner -> the variant name sits under the egg (2.2 - 3.0 s)
+
+        A literal window shake was considered for the crack beat and
+        deliberately dropped: this is a click-through topmost overlay, and
+        moving the window itself fights the OS compositor.  The egg jitter
+        carries the same beat without the glitch.
+        """
+        phase = self.reveal_phase()
+        t = self.reveal["t"]
+        p.save()
+        wobble = 0.0
+        if phase == "shake":
+            # ~3 wobbles over 0.6 s
+            wobble = math.sin(t / self.REVEAL_SHAKE * math.pi * 6) * 4.0 * s
+        elif phase == "crack":
+            # fast small jitter while the shell splits
+            wobble = math.sin(t * 60.0) * 1.6 * s
+        self._draw_egg(p, cx, cy, True, s, wobble=wobble,
+                       crack=phase in ("crack", "flash", "banner"))
+        if phase in ("flash", "banner"):
+            # the egg takes on the variant's colour as it "becomes" the pet
+            pal = _variants.palette_for(self.genes)
+            k = clamp((t - self.REVEAL_CRACK) / 0.8, 0.0, 1.0)
+            egg_col = _variants.mix((250, 220, 130), pal["abdo_c"], k)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(*egg_col, 120))
+            p.drawEllipse(QPointF(cx + wobble, cy), 18 * s, 10 * s)
+            # rarity rays
+            col = QColor(_variants.rarity_color(self.genes))
+            col.setAlpha(230)
+            p.setPen(QPen(col, 1.6 * s, Qt.SolidLine, Qt.RoundCap))
+            rr = 30 * s + k * 14 * s
+            for i in range(8):
+                a = i * math.pi / 4.0 + t * 1.5
+                p.drawLine(QPointF(cx + wobble + math.cos(a) * rr * 0.55,
+                                   cy + math.sin(a) * rr * 0.32),
+                           QPointF(cx + wobble + math.cos(a) * rr,
+                                   cy + math.sin(a) * rr * 0.58))
+            # expanding ring
+            ring_r = (t - self.REVEAL_CRACK) * 90 * s
+            if ring_r > 0:
+                rc = QColor(col)
+                rc.setAlpha(int(200 * clamp(1.0 - ring_r / (90 * s), 0.0, 1.0)))
+                p.setPen(QPen(rc, 1.4 * s))
+                p.setBrush(Qt.NoBrush)
+                p.drawEllipse(QPointF(cx + wobble, cy), ring_r, ring_r * 0.55)
+        if phase == "banner":
+            # the variant name, centred under the egg
+            text = self.reveal["banner"]
+            px = sum(15 if ord(ch) > 0x2E80 else 8 for ch in text)
+            bw = min(max(px + 36, 180), 340)
+            box = QRectF(0, 0, bw, 30)
+            box.moveCenter(QPointF(cx + wobble, cy + 34 * s))
+            path = QPainterPath()
+            path.addRoundedRect(box, 8, 8)
+            p.setOpacity(0.92)
+            bc = QColor(_variants.rarity_color(self.genes))
+            bc.setAlpha(40)
+            p.fillPath(path, QColor(20, 28, 36, 225))
+            p.setPen(QPen(QColor(_variants.rarity_color(self.genes)), 1.2))
+            p.drawPath(path)
+            p.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
+            p.setPen(QColor(235, 242, 250))
+            p.drawText(box, Qt.AlignCenter, text)
+        p.restore()
+
+    def draw_reveal_flash(self, p, sw, sh):
+        """Full-screen slow flash -- only for the hidden tier.  Drawn by the
+        overlay (it knows the screen size; the nest does not)."""
+        if self.reveal is None:
+            return
+        if _variants.morph_of(self.genes)["rarity"] != "hidden":
+            return
+        t = self.reveal["t"]
+        if t < self.REVEAL_CRACK or t >= self.REVEAL_FLASH:
+            return
+        # slow pulse: one breath over the flash window
+        k = (t - self.REVEAL_CRACK) / (self.REVEAL_FLASH - self.REVEAL_CRACK)
+        alpha = int(90 * math.sin(k * math.pi))
+        if alpha <= 0:
+            return
+        p.save()
+        p.setOpacity(1.0)
+        p.fillRect(QRectF(0, 0, sw, sh), QColor(255, 236, 180, alpha))
         p.restore()
 
     def _draw_larva(self, p, cx, cy, s):
@@ -1202,9 +1393,14 @@ class Offspring:
         def pt(fx, fy):
             return QPointF(x0 + L * fx, y0 + H * fy)
 
-        body_col = QColor(202, 164, 110)
-        edge = QColor(142, 104, 60)
-        seg = QColor(166, 126, 76)
+        # The larva already carries the family colour: a pale blend of the
+        # default larva tan and the variant's abdomen colour.  You can tell
+        # which morph hatched long before it becomes an adult.
+        cream = (238, 222, 190)
+        abdo = _variants.palette_for(self.genes)["abdo_c"]
+        body_col = QColor(*_variants.mix(cream, abdo, 0.35))
+        edge = QColor(*_variants.mix(cream, abdo, 0.62)).darker(112)
+        seg = QColor(*_variants.mix(cream, abdo, 0.48))
 
         # ---- body: spindle tapering into the tail ----
         body = QPainterPath()
@@ -1276,10 +1472,13 @@ class Offspring:
         def pt(fx, fy):            # -> QPointF for drawLine / drawEllipse
             return QPointF(x0 + L * fx, y0 + H * fy)
 
-        # colours tan toward the adult as the imago develops inside
-        base = QColor(int(240 - 55 * prog), int(232 - 55 * prog), int(205 - 58 * prog))
-        edge = QColor(int(178 - 30 * prog), int(166 - 32 * prog), int(132 - 26 * prog))
-        seg = QColor(int(198 - 30 * prog), int(184 - 32 * prog), int(148 - 26 * prog))
+        # colours tan toward THIS variant's adult colour as the imago
+        # develops inside (was: a fixed brown, so every pupa looked the same)
+        cream = (240, 232, 205)
+        abdo = _variants.palette_for(self.genes)["abdo_c"]
+        base = QColor(*_variants.mix(cream, abdo, prog))
+        edge = QColor(*_variants.mix((178, 166, 132), abdo, prog))
+        seg = QColor(*_variants.mix((198, 184, 148), abdo, prog))
 
         # ---- body: capsule, abdomen fullest around two thirds ----
         # the front is pinched into a short "neck" so the head reads as attached
@@ -1365,8 +1564,10 @@ class Offspring:
             abdomen 0.300 - 0.866   banded orange, 0.51 H
             tail    0.866 - 1.000   black cone, tapering to 0.19 H
 
-        Colours are sampled from the same sprite, so the offspring visibly
-        grows up into its parent rather than into a generic blob.
+        Colours come from the clutch's variant: the same sprite-sampled
+        palette, shifted per morph (variants.py), so the offspring visibly
+        grows up into ITS family rather than into a generic blob.  The
+        pattern axis overlays spots / deep bands / a dark head on top.
 
         It also has to keep moving: this was the only stage that ignored
         `anim_t`, and `tick()` returns early once ADULT is reached, so a grown
@@ -1397,16 +1598,25 @@ class Offspring:
         def pt(fx, fy):
             return QPointF(*xy(fx, fy))
 
-        # palette sampled from sprites/walk_right.png
-        head_c = QColor(198, 60, 34)
-        pro_c = QColor(184, 48, 28)
-        abdo_c = QColor(214, 92, 46)
-        band_c = QColor(146, 44, 20)
-        black = QColor(38, 33, 30)
-        eye_c = QColor(22, 18, 16)
-        leg_hi = QColor(202, 100, 48)
-        leg_lo = QColor(46, 40, 35)
-        rim = QColor(118, 30, 16)
+        # palette from the clutch's variant: the parent's sampled colours,
+        # shifted per morph (see variants.py).  A light morph (白化) needs a
+        # thicker rim or it dissolves into a light wallpaper.
+        pal = _variants.palette_for(self.genes)
+        pattern = _variants.pattern_of(self.genes)["id"]
+        head_c = QColor(*pal["head_c"])
+        pro_c = QColor(*pal["pro_c"])
+        abdo_c = QColor(*pal["abdo_c"])
+        band_c = QColor(*pal["band_c"])
+        black = QColor(*pal["black"])
+        eye_c = QColor(*pal["eye_c"])
+        leg_hi = QColor(*pal["leg_hi"])
+        leg_lo = QColor(*pal["leg_lo"])
+        rim = QColor(*pal["rim"])
+        rim_w = 2.4 if _variants.is_light_morph(self.genes) else 1.2
+        # 异色头 swaps the head + pronotum to near-black; everything else
+        # keeps the morph colour.
+        head_fill = black.lighter(135) if pattern == "dark_head" else head_c
+        pro_fill = black.lighter(125) if pattern == "dark_head" else pro_c
 
         # ---- far-side legs first, so the body overlaps them ----------------
         p.setPen(QPen(leg_lo.lighter(150), 1.4 * s, Qt.SolidLine, Qt.RoundCap))
@@ -1461,6 +1671,14 @@ class Offspring:
         p.setBrush(Qt.NoBrush)
         for fx in bounds:
             p.drawPath(_bow(fx))
+        if pattern == "bands":
+            # 深横带: every other plate boundary gets a thick dark bow.  The
+            # default faint lines read as plate edges; this reads as a
+            # pattern without touching the body silhouette.
+            p.setPen(QPen(band_c.darker(118), 2.4 * s, Qt.SolidLine,
+                          Qt.RoundCap))
+            for fx in bounds[1::2]:
+                p.drawPath(_bow(fx, span=0.045, reach=0.82))
         tip = QPainterPath()             # the black tail cone
         tip.moveTo(*xy(0.866, -0.80))
         tip.lineTo(*xy(1.12, -0.80))
@@ -1498,6 +1716,14 @@ class Offspring:
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(255, 255, 255, 70))
         p.drawEllipse(pt(0.362, -0.36), L * 0.052, H * 0.12)
+        if pattern == "spots":
+            # 鞘翅斑点: dark dots clipped to the wing covers
+            p.setClipPath(ely)
+            p.setBrush(band_c.darker(140))
+            for fx, fy, r in ((0.360, -0.28, 0.030),
+                              (0.425, 0.10, 0.024),
+                              (0.330, 0.20, 0.019)):
+                p.drawEllipse(pt(fx, fy), L * r, H * r * 1.7)
         p.restore()
 
         # ---- pronotum: the red-orange thorax shield ------------------------
@@ -1509,10 +1735,10 @@ class Offspring:
         pro.cubicTo(*xy(0.235, 0.48), *xy(0.162, 0.44), *xy(0.152, 0.26))
         pro.closeSubpath()
         pg = QLinearGradient(0, y0 - H * 0.44, 0, y0 + H * 0.44)
-        pg.setColorAt(0.0, pro_c.lighter(126))
-        pg.setColorAt(0.55, pro_c)
-        pg.setColorAt(1.0, pro_c.darker(134))
-        p.setPen(QPen(rim, 1.2))
+        pg.setColorAt(0.0, pro_fill.lighter(126))
+        pg.setColorAt(0.55, pro_fill)
+        pg.setColorAt(1.0, pro_fill.darker(134))
+        p.setPen(QPen(rim, rim_w))
         p.setBrush(pg)
         p.drawPath(pro)
 
@@ -1535,19 +1761,21 @@ class Offspring:
         hd.cubicTo(*xy(0.070, 0.44), *xy(0.026, 0.38), *xy(0.018, 0.20))
         hd.closeSubpath()
         hg = QLinearGradient(0, y0 - H * 0.44, 0, y0 + H * 0.44)
-        hg.setColorAt(0.0, head_c.lighter(124))
-        hg.setColorAt(0.6, head_c)
-        hg.setColorAt(1.0, head_c.darker(134))
-        p.setPen(QPen(rim, 1.1))
+        hg.setColorAt(0.0, head_fill.lighter(124))
+        hg.setColorAt(0.6, head_fill)
+        hg.setColorAt(1.0, head_fill.darker(134))
+        p.setPen(QPen(rim, rim_w * 0.9))
         p.setBrush(hg)
         p.drawPath(hd)
 
+        # eye: dark on a light head, light on the 异色头's black head
+        eye_use = QColor(205, 205, 210) if pattern == "dark_head" else eye_c
         p.setPen(Qt.NoPen)               # eye + specular dot
-        p.setBrush(eye_c)
+        p.setBrush(eye_use)
         p.drawEllipse(pt(0.098, -0.14), L * 0.017, H * 0.115)
         p.setBrush(QColor(255, 255, 255, 160))
         p.drawEllipse(pt(0.092, -0.18), 0.8 * s, 0.8 * s)
-        p.setPen(QPen(rim.darker(115), 1.1))   # mandibles
+        p.setPen(QPen(rim.darker(115), rim_w * 0.9))   # mandibles
         p.drawLine(pt(0.024, -0.04), pt(-0.012, -0.11))
         p.drawLine(pt(0.024, 0.04), pt(-0.012, 0.11))
 
@@ -1608,7 +1836,12 @@ class Offspring:
         p.drawText(QPointF(rect.x() + 10, rect.y() + 16), "后代")
         p.setFont(QFont("Microsoft YaHei", 9))
         p.setPen(QColor(220, 230, 240))
-        p.drawText(QPointF(rect.x() + 46, rect.y() + 16), self.stage_name())
+        # The variant name is only shown once the box has been opened --
+        # while it is still an egg, what is inside stays a secret.
+        label = self.stage_name()
+        if self.revealed:
+            label += " · " + _variants.banner(self.genes).split(" · ", 1)[1]
+        p.drawText(QPointF(rect.x() + 46, rect.y() + 16), label)
         if self.stage == self.STAGE_ADULT:
             # A 100%-full bar reads as "still loading, never finishes", which
             # is exactly what made a grown pet look stuck.  Say it in words.
@@ -1950,6 +2183,8 @@ class InfoButton:
             "• 右键虫子 → 联机：加入房间，即可与同事跨电脑互动、远程交配",
             "• 加房可输入房间码，或直接粘 ws://…地址（IP 变了时用）",
             "• 交配约 10 秒后，发起方窝里出现虫卵（卵→孵化→幼虫→成长→成虫）",
+            "• 后代盲盒：孵化瞬间随机开出体色 / 纹样 / 体型，越稀有恢复越快",
+            "• 右键虫子 → 后代图鉴：查看 9 款体色的收集进度",
             "• 养到成年后它留在窝里活动；再满值召唤一次即可换下一窝",
             "• 右键虫子 → 菜单；F1 → 帮助；Esc → 退出",
             "",
@@ -2113,6 +2348,8 @@ class RoomOverlay(QWidget):
         self.mate = None          # second bug, summoned via "召唤伴侣"
         self.offspring = None     # the clutch laid after a successful mating
         self.mating = None        # active Mating controller (Phase 3)
+        # blind-box dex (图鉴): {morph_id: {count, best_pattern, best_size}}
+        self.dex = {}
         # cross-PC play (Phase 4)
         self.net = None           # NetClient when connected
         self.remote_bug = None    # peer bug rendered from network snapshots
@@ -2280,9 +2517,12 @@ class RoomOverlay(QWidget):
                                           self.dome.STATE_SINKING,
                                           self.dome.STATE_CLEARING)
         self.fog_btn.tick(dome_active=dome_active)
-        # Offspring life-cycle advance
+        # Offspring life-cycle advance (returns reveal events)
         if self.offspring is not None:
-            self.offspring.tick(DT)
+            ev = self.offspring.tick(DT)
+            if ev == "reveal_start":
+                # the box just opened: count it in the dex immediately
+                self._record_dex(self.offspring.genes)
         # Mating sequence (Phase 3): drive both bugs, then lay the egg.
         if self.mating is not None:
             res = self.mating.tick(DT, self.sw, self.sh)
@@ -2354,6 +2594,11 @@ class RoomOverlay(QWidget):
     def mousePressEvent(self, event):
         pt = QPointF(event.pos())
         if event.button() == Qt.LeftButton:
+            # A running blind-box reveal swallows the click: it is the
+            # documented way to skip the show.
+            if self.offspring is not None and self.offspring.reveal is not None:
+                self.offspring.skip_reveal()
+                return
             # Specific zones win over the (huge) bug sprite, so the lamp and
             # info button always respond even when the bug overlaps them.
             if self.fog_btn.contains(pt):
@@ -2496,6 +2741,9 @@ class RoomOverlay(QWidget):
                     a_nmate.setEnabled(False)
                     a_nmate.setText("联机：邀请交配（需联机+满值+对端在场）")
                 menu.addAction(a_nmate)
+            a_dex = QAction("后代图鉴", self)
+            a_dex.triggered.connect(self._show_dex)
+            menu.addAction(a_dex)
             menu.addSeparator()
         a1 = QAction("让它飞一下", self)
         a1.triggered.connect(lambda: bug._start_random_flight(self.sw, self.sh))
@@ -2603,7 +2851,12 @@ class RoomOverlay(QWidget):
             off = {"stage": self.offspring.stage,
                    "idx": self.offspring.idx,
                    "t": self.offspring.t,
-                   "done": self.offspring.done}
+                   "done": self.offspring.done,
+                   # blind box: the variant is rolled at lay time and must
+                   # survive restarts; `revealed` keeps the egg a secret
+                   # until the box is actually opened.
+                   "genes": self.offspring.genes,
+                   "revealed": self.offspring.revealed}
         return {
             "ver": 1,
             "ts": time.time(),
@@ -2620,6 +2873,7 @@ class RoomOverlay(QWidget):
                 "happy": self.hud.happy,
             },
             "offspring": off,
+            "dex": self.dex,
         }
 
     def _save_game(self):
@@ -2731,9 +2985,26 @@ class RoomOverlay(QWidget):
                           % (st, idx, self.offspring.stage))
             self.offspring.t = max(0.0, float(o.get("t", 0.0)))
             self.offspring.done = bool(o.get("done", False))
+            # blind-box variant.  Old saves (written before the variant
+            # engine existed) have no `genes` at all: sanitize_genes then
+            # falls back to the parent look -- the same "looks like mum and
+            # dad" default a fresh clutch rolls most of the time anyway.
+            # `revealed` stays False until the box is actually opened, so an
+            # egg restored from an old save is still a secret egg.
+            genes, _ok = _variants.sanitize_genes(o.get("genes"))
+            self.offspring.genes = genes
+            self.offspring.revealed = bool(o.get("revealed", False))
             if self.offspring.done:
                 self.offspring.stage = Offspring.STAGE_ADULT
                 self.offspring.idx = len(Offspring.ORDER) - 1
+        # ---- dex (图鉴) ----
+        dx = d.get("dex")
+        if isinstance(dx, dict):
+            known = {m["id"] for m in _variants.MORPHS}
+            self.dex = {mid: e for mid, e in dx.items()
+                        if mid in known and isinstance(e, dict)}
+        # rarity bonus follows the current clutch
+        self._sync_recover_mult()
         # advance both by the offline time (big dt -> the normal tick handles
         # multi-stage transitions because it loops the surplus over).
         if offline > 0 or self.offspring is not None:
@@ -2741,7 +3012,14 @@ class RoomOverlay(QWidget):
                 self.hud.decay_offline(offline)
                 for _ in range(int(offline / DT) + 1):
                     if self.offspring is not None:
-                        self.offspring.tick(DT)
+                        ev = self.offspring.tick(DT)
+                        if ev == "reveal_start":
+                            # It hatched while the app was closed: record the
+                            # dex entry now.  The show itself runs out inside
+                            # the remaining ticks of this catch-up loop (or is
+                            # simply skipped on a huge dt) -- the count is what
+                            # must not be lost.
+                            self._record_dex(self.offspring.genes)
         self.hud.decay(sleeping=b.get("sleeping", False))  # refresh in_heat
 
     def closeEvent(self, event):
@@ -2768,6 +3046,45 @@ class RoomOverlay(QWidget):
             # and then nothing appeared -- indistinguishable from a bug.
             self.offspring = Offspring()
             self._toast("成年虫飞走了，窝里换上新的一窝卵", 6.0)
+        # a fresh clutch rolls a fresh variant -> refresh the rarity bonus
+        self._sync_recover_mult()
+
+    def _sync_recover_mult(self):
+        """The rarity recovery bonus follows the CURRENT clutch (1.0 with no
+        clutch or a plain one).  Called whenever the clutch changes."""
+        if self.offspring is not None:
+            self.hud.recover_mult = _variants.recover_mult(self.offspring.genes)
+        else:
+            self.hud.recover_mult = 1.0
+
+    def _record_dex(self, genes):
+        """One more variant opened: bump the 图鉴 entry and persist at once,
+        so a crash in the middle of the reveal show can never lose the
+        count."""
+        _variants.dex_update(self.dex, genes)
+        self._save_game()
+
+    def _show_dex(self):
+        """The 图鉴 (collection wall): 9 morph cells, opened ones show their
+        count and best pattern / size, unopened ones stay '???'.
+
+        A dialog rather than an overlay panel: it is opened deliberately,
+        read, and dismissed."""
+        from PyQt5.QtWidgets import QMessageBox
+        lines = _variants.dex_lines(self.dex)
+        opened = sum(1 for ln in lines if "未开出" not in ln)
+        box = QMessageBox(self)
+        box.setWindowTitle("后代图鉴")
+        box.setText("已开出 %d / 9 款体色" % opened)
+        box.setInformativeText("\n".join(lines))
+        box.setStyleSheet("""
+            QMessageBox { background: rgba(30, 38, 48, 245); }
+            QLabel { color: #E6EEF6; font-size: 13px; }
+            QPushButton { color: white; background: rgba(60, 80, 100, 210);
+                          border: 1px solid #5a8; border-radius: 4px;
+                          padding: 4px 16px; }
+        """)
+        box.exec_()
 
     # ---------- cross-PC play (Phase 4) ----------
     def connect_room(self, room: str, name: str, color: str = "#85B7EB",
@@ -2907,6 +3224,9 @@ class RoomOverlay(QWidget):
         if self.offspring is not None:
             nc = self.nest.rect.center()
             self.offspring.draw_in_nest(p, nc.x(), nc.y() + 6)
+            # hidden-tier reveal: full-screen slow flash (needs the screen
+            # size, which the nest itself does not know)
+            self.offspring.draw_reveal_flash(p, self.sw, self.sh)
         # 7) Dome fog (full-screen wallpaper-based AI frames)
         self.dome.draw_fog(p, self.sw, self.sh)
         # 8) Zzz above nest

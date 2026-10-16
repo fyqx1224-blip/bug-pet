@@ -8,6 +8,10 @@ Renders every stage onto an offscreen QImage and asserts that
   * the pupa grows with stage progress
   * the pupa tans (darkens) as eclosion approaches
 Real PyQt5, QT_QPA_PLATFORM=offscreen.
+
+The variant is PINNED (classic / plain / normal): Offspring() now rolls a
+random blind-box variant, and the size axis would make the geometry checks
+non-deterministic -- this suite is about stage behaviour, not the roll.
 """
 import os
 import sys
@@ -27,6 +31,8 @@ import room_overlay as R                          # noqa: E402
 app = QApplication(sys.argv)
 O = R.Offspring
 CW, CH = 220, 160
+FIXED_GENES = {"morph": "classic", "pattern": "plain",
+               "size": "normal", "rarity": "common"}
 
 
 def render(stage, prog, anim_t=1.6):
@@ -34,7 +40,7 @@ def render(stage, prog, anim_t=1.6):
     img.fill(Qt.transparent)
     p = QPainter(img)
     p.setRenderHint(QPainter.Antialiasing, True)
-    off = O()
+    off = O(genes=FIXED_GENES)
     off.idx = O.ORDER.index(stage)
     off.stage = stage
     off.anim_t = anim_t                  # drives the idle motion
