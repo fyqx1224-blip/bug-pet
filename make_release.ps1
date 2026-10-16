@@ -290,7 +290,9 @@ try {
         $ahead = 1
     }
     if ($ahead -gt 0) {
-        git push
+        # -u sets the upstream on the first push (a fresh clone/branch has
+        # none, and plain `git push` then dies with "no upstream branch").
+        git push -u origin main
         if ($LASTEXITCODE -ne 0) { throw 'git push failed' }
         Write-Host "[ok] pushed $ahead commit(s)"
     } else {
